@@ -28,6 +28,11 @@ def parse_args():
     ap.add_argument("--chrom", required=True)
     ap.add_argument("--pvar", required=True)
     ap.add_argument("--out_score", required=True)
+    ap.add_argument(
+        "--score_name",
+        default="SCORE",
+        help="Name for the coefficient column in the output score file header."
+    )
     ap.add_argument("--allow_strand_flip", action="store_true")
     return ap.parse_args()
 
@@ -47,6 +52,7 @@ def main():
     print(f"[make_scorefile] pvar={pvar_path}")
     print(f"[make_scorefile] out={out_score}")
     print(f"[make_scorefile] allow_strand_flip={args.allow_strand_flip}")
+    print(f"[make_scorefile] score_name={args.score_name}")
 
     # Read weights
     w = pd.read_csv(wpath, sep="\t", compression="infer")
@@ -155,11 +161,13 @@ def main():
         out_score.write_text("")
         return 0
 
-    score_df = pd.DataFrame(rows, columns=["ID", "ALLELE", "SCORE"])
+    # Use a per-trait score name so PLINK2 can carry it through to .sscore column names.
+    score_name = str(args.score_name).strip() or "SCORE"
+    score_df = pd.DataFrame(rows, columns=["ID", "ALLELE", score_name])
 
     # Deduplicate variant IDs by |beta| (same as your notebook tie-breaker)
     if score_df["ID"].duplicated().any():
-        score_df["absS"] = score_df["SCORE"].abs()
+        score_df["absS"] = score_df[score_name].abs()
         score_df = (
             score_df.sort_values(["ID", "absS"], ascending=[True, False])
                     .drop_duplicates("ID", keep="first")
@@ -172,4 +180,5 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

@@ -64,6 +64,13 @@ process SCORE_CHR_ALL_TRAITS {
   }
 
   # Loop line-by-line through weights.list (robust)
+  # We will build score files for all traits first, then run a single PLINK2 call
+  # with --score-list. This avoids reloading the chromosome + recalculating allele
+  # frequencies for every single trait.
+
+  : > scorefiles.list
+  : > expected_traits.list
+
   while IFS= read -r wf; do
     [[ -z "$wf" ]] && continue
 
@@ -75,16 +82,18 @@ process SCORE_CHR_ALL_TRAITS {
     echo "Weight file: $wf"
     echo "------------------------------------------"
 
+    echo "$trait" >> expected_traits.list
+
     python3 !{projectDir}/bin/make_scorefile.py \
       --weights "$wf" \
       --chrom !{chrom} \
       --pvar "${pfile_prefix}.pvar" \
       --out_score "${trait}.chr!{chrom}.score.tsv" \
+      --score_name "$trait" \
       !{ params.get('allow_strand_flip', false) ? '--allow_strand_flip' : '' }
 
     if [ ! -s "${trait}.chr!{chrom}.score.tsv" ]; then
       echo "WARNING: Empty score file (no overlaps) for $trait chr!{chrom}"
-      touch "${trait}.chr!{chrom}.scored.sscore"
       continue
     fi
 
@@ -92,23 +101,38 @@ process SCORE_CHR_ALL_TRAITS {
     echo "Variants to score: ${VARIANT_COUNT}"
 
     if [ "${VARIANT_COUNT}" -eq 0 ]; then
-      touch "${trait}.chr!{chrom}.scored.sscore"
       continue
     fi
 
-    !{params.get('plink2_bin','plink2')} \
-      --pfile "${pfile_prefix}" \
-      --score "${trait}.chr!{chrom}.score.tsv" header-read 1 2 3 cols=+scoresums \
-      --threads !{task.cpus} \
-      --out "${trait}.chr!{chrom}.scored" \
-      !{ params.get('write_list_variants', false) ? 'list-variants' : '' }
-
-    if [ ! -f "${trait}.chr!{chrom}.scored.sscore" ]; then
-      echo "ERROR: Missing .sscore for $trait chr!{chrom}"
-      touch "${trait}.chr!{chrom}.scored.sscore"
-    fi
+    # Non-empty score file -> add to --score-list input.
+    echo "${trait}.chr!{chrom}.score.tsv" >> scorefiles.list
 
   done < !{weights_list}
+
+  if [ ! -s scorefiles.list ]; then
+    echo "WARNING: No non-empty score files for chr!{chrom}; emitting empty .sscore files"
+    while IFS= read -r t; do
+      [[ -z "$t" ]] && continue
+      touch "${t}.chr!{chrom}.scored.sscore"
+    done < expected_traits.list
+    exit 0
+  fi
+
+  echo ""
+  echo "Running ONE PLINK2 scoring call for chr!{chrom} with $(wc -l < scorefiles.list) traits"
+
+  !{params.get('plink2_bin','plink2')} \
+    --pfile "${pfile_prefix}" \
+    --score-list scorefiles.list header-read 1 2 3 cols=+scoresums \
+    --threads !{task.cpus} \
+    --out "chr!{chrom}.alltraits.scored" \
+    !{ params.get('write_list_variants', false) ? 'list-variants' : '' }
+
+  # Split chrX.alltraits.scored.sscore -> per-trait files with SCORE_SUM column
+  python3 !{projectDir}/bin/split_multisscore.py \
+    --sscore "chr!{chrom}.alltraits.scored.sscore" \
+    --chrom "!{chrom}" \
+    --expected_traits expected_traits.list
 
   echo ""
   echo "All traits finished for chr!{chrom}."

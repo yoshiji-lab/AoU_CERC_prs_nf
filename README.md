@@ -1,114 +1,136 @@
-# AoU_CERC_prs_nf — PRS scoring pipeline (Nextflow DSL2, AoU Workbench)
+# AoU_CERC_prs_nf (Nextflow) — PRS scoring in **22 chromosome jobs** (recommended)
 
-This repository contains a **local-first Nextflow pipeline** for computing **polygenic risk scores (PRS)** in the **All of Us (AoU) Researcher Workbench**, using:
+This repository computes **polygenic risk scores (PRS)** in the **All of Us (AoU) Researcher Workbench** using:
+- AoU genotype files in **PLINK2 pfile** format (`.pgen/.pvar/.psam`), one set per chromosome, and
+- GWAS **weight files** (usually LD-clumped), one file per trait.
 
-- **AoU PLINK2 pfiles** (`.pgen/.pvar/.psam`) per chromosome, and  
-- per-trait **GWAS weight files** (typically LD-clumped) with effect sizes
-
-✅ **Key design choice (“22-job structure”)**  
-This pipeline runs **one job per chromosome**, and inside that chromosome job it scores **all traits**.  
-That means each chromosome’s `.pgen/.pvar/.psam` is “loaded” once and reused, which is **much faster and more I/O efficient** than running `(trait × chr)` as separate jobs.
+✅ **This README explains only the recommended way to run the pipeline:**  
+**the “22-job structure” = 1 job per chromosome (chr1…chr22)**.
 
 ---
 
-## What this pipeline produces
+## The one idea you need to understand: “22-job structure”
 
-### For each trait
-1. **Per-chromosome PLINK2 scoring outputs** (`*.sscore`)
-2. A **genome-wide PRS per individual** (a single “SUM” score per sample)
+If you are new to PRS scoring, the slow part is often not the scoring itself—it's repeatedly opening huge genotype files and doing setup work (like allele frequency calculations).
 
-### Across all traits
-3. A **wide PRS matrix** (one row per sample, one column per trait)
+### What “22-job structure” means (plain English)
 
-### Nextflow diagnostics
-The pipeline writes standard Nextflow run artifacts into your `--outdir`:
+- Human autosomal DNA is split into **22 chromosomes** (chr1–chr22).
+- AoU genotype data is stored as **one big file-set per chromosome**:
+  - `chr7.pgen`, `chr7.pvar`, `chr7.psam`  (and similarly for each chromosome)
+- If you score **one trait at a time**, you end up doing this many times:
+  - “Open chr7 files → do setup → score trait A”  
+  - “Open chr7 files → do setup → score trait B”  
+  - “Open chr7 files → do setup → score trait C”  
+  …which is slow and costs more compute.
 
-- `pipeline_report.html` (HTML report)
-- `pipeline_timeline.html` (timeline / concurrency view)
-- `pipeline_trace.txt` (task table)
-- `pipeline_dag.svg` (pipeline DAG)
+### What this pipeline does instead
+
+For each chromosome **once**:
+
+1. **Load the chromosome pfiles once** (e.g., chr7)
+2. **Score ALL traits for that chromosome in one PLINK2 run**
+3. Save per-trait per-chromosome results
+4. After all chromosomes finish, merge them to build final PRSs
+
+So the pipeline runs **22 chromosome jobs** (chr1…chr22).  
+Each chromosome job runs **one PLINK2 scoring pass** for all traits.
+
+That’s the core optimization.
 
 ---
 
-## Repository layout (core files)
+## What you will get at the end
+
+You will get:
+
+1. **Per-chromosome PRS outputs** (for debugging + merging)
+2. **Per-trait genome-wide PRS** (one PRS per person per trait)
+3. **A wide PRS matrix** (one row per person, one PRS column per trait)
+
+And Nextflow run reports (HTML) so you can see what ran and how long it took.
+
+---
+
+## Folder structure (what matters)
 
 ```
-.
+AoU_CERC_prs_nf/
 ├── main.nf
 ├── nextflow.config
-├── nextflow-1.config          # optional alt config (older / different inputs)
-├── nextflow                  # local Nextflow launcher (recommended to use)
-└── README_run.md             # legacy notes (Batch/GCS style; not recommended)
+├── nextflow                      # local Nextflow launcher (recommended)
+├── modules/
+│   ├── score_chr_all_traits.nf    # ✅ core: 1 job per chromosome, score ALL traits
+│   ├── merge_trait.nf             # merge chr-level scores → genome-wide PRS per trait
+│   ├── build_matrix.nf            # merge all traits → final wide matrix
+│   └── score_trait_chr.nf         # 🚫 IGNORE for now (older structure, not recommended)
+├── bin/
+│   ├── make_scorefile.py          # builds PLINK2 score file for a trait+chrom
+│   ├── split_multisscore.py       # splits combined .sscore → per-trait .sscore
+│   ├── merge_sscore_parts.py      # merges chr scores → genome-wide trait PRS
+│   └── build_prs_matrix.py        # builds the final wide PRS matrix
+└── docker/
+    └── Dockerfile
 ```
 
-### What each file does
+**Important:** `modules/score_trait_chr.nf` exists in the repo but **is not recommended** and **is not explained here**.
 
-#### `main.nf`
-The main Nextflow workflow:
-- parses chromosomes (`--chroms`)
-- discovers weight files (`--weights_glob`)
-- optionally filters traits (`--traits`)
-- builds a single `weights.list` file (absolute file paths)
-- runs **one job per chromosome** via `SCORE_CHR_ALL_TRAITS`
-- groups `*.sscore` by trait and merges them (`MERGE_TRAIT`)
-- builds final wide matrix (`BUILD_MATRIX`)
+---
 
-#### `nextflow.config`
-Your **local-only safe config** for AoU Workbench.
-- avoids Google Batch + avoids `gs://` working dirs by default
-- uses `stageInMode = 'symlink'` (important: avoids copying giant pfiles)
-- emits trace/report/timeline/dag into `--outdir`
-- controls concurrency with `--max_forks`
+## Before you run: what you need
 
-#### `nextflow` (local binary)
-This is the **recommended Nextflow executable** (pinned to the version you installed).
-Run the pipeline with:
+### 1) Nextflow
+AoU often has a preinstalled Nextflow, but we recommend using a **local pinned version** (same as AoU training).
 
+Check version:
+```bash
+nextflow -v
+```
+
+Install Nextflow `v24.10.4` locally inside this repo folder:
+```bash
+curl -s -L https://github.com/nextflow-io/nextflow/releases/download/v24.10.4/nextflow | bash
+chmod +x ./nextflow
+./nextflow -v
+```
+
+From now on, run Nextflow as:
 ```bash
 ./nextflow run main.nf ...
 ```
 
-#### `README_run.md`
-Older “Batch/GCS-style” examples.  
-**Not recommended** if you want to avoid shared-bucket overwrite risk.
+### 2) PLINK2
+You need `plink2` available (or provide its path via `--plink2_bin`).
 
----
-
-## Requirements
-
-### Tools
-- **Nextflow** (recommended: **24.10.4**, from AoU training)
-- **PLINK2** available as `plink2` on PATH
-- Local filesystem space for `workdir` and outputs
-
-### Inputs
-
-#### 1) Genotype pfiles (one per chromosome)
-Example layout:
-
-```
-<pfile_dir>/snpqc.chr1.pgen
-<pfile_dir>/snpqc.chr1.pvar
-<pfile_dir>/snpqc.chr1.psam
-...
-<pfile_dir>/snpqc.chr22.*
+Check:
+```bash
+plink2 --version
 ```
 
-You control naming via:
+### 3) Inputs
+You need two inputs:
 
-- `--pfile_dir`
-- `--pfile_pref` (must contain `{chrom}`, e.g. `snpqc.chr{chrom}`)
+#### (A) Genotypes: pfiles per chromosome
+You need files like:
+- `snpqc.chr1.pgen`, `snpqc.chr1.pvar`, `snpqc.chr1.psam`
+- ...
+- `snpqc.chr22.pgen`, `snpqc.chr22.pvar`, `snpqc.chr22.psam`
 
-#### 2) Weight files (one per trait)
-Weight files are discovered by:
+You will tell the pipeline where they are using:
+- `--pfile_dir` (folder)
+- `--pfile_pref` (prefix template, e.g. `snpqc.chr{chrom}`)
 
+#### (B) GWAS weights (one file per trait)
+These are your clumped GWAS files. Example filenames:
+- `VAT_to_Android_clumped.tsv.gz`
+- `Leg_lean_clumped.tsv.gz`
+- etc.
+
+You will tell the pipeline which files to use with:
 - `--weights_glob "/path/to/weights/*.tsv.gz"`
+- optionally `--traits "Trait1,Trait2"` to run a subset
 
-Trait names are derived from filenames by stripping:
-- `.tsv.gz`, `.csv.gz`, `.tsv`, `.csv`, `.gz`
-- and a trailing `_clumped`
-
-**Expected columns in weights** (minimum):
+Your weights must contain columns like:
 - `chromosome`
 - `base_pair_location`
 - `effect_allele`
@@ -117,420 +139,189 @@ Trait names are derived from filenames by stripping:
 
 ---
 
-## Update Nextflow (AoU training commands)
+## Recommended way to run (always): use tmux
 
-AoU Workbench sometimes has a preinstalled Nextflow. Check it:
+AoU notebooks/SSH sessions can disconnect. `tmux` keeps your run alive.
 
+Start a tmux session:
 ```bash
-nextflow -v
+tmux new -s prs_nf
 ```
 
-Install **Nextflow 24.10.4** in the current directory:
-
-```bash
-curl -s -L https://github.com/nextflow-io/nextflow/releases/download/v24.10.4/nextflow | bash
-chmod +x nextflow
-./nextflow -v
-```
-
-✅ From here on, **always run with the local binary**:
-
-```bash
-./nextflow run main.nf ...
-```
-
----
-
-## Quickstart (recommended local AoU Workbench run)
-
-From the repo root:
-
-```bash
-./nextflow run main.nf \
-  -c nextflow.config \
-  --chroms 21..22 \
-  --weights_glob "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/inputs/test/*.tsv.gz" \
-  --pfile_dir "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/pgen_dir" \
-  --pfile_pref "snpqc.chr{chrom}" \
-  --outdir "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/prs_out_test" \
-  --workdir "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/nf_work/prs_out_test" \
-  -resume
-```
-
-### Useful options
-
-Run only selected traits:
-
-```bash
-./nextflow run main.nf -c nextflow.config \
-  --traits "VATadj,BMIadj" \
-  --chroms 21..22 \
-  -resume
-```
-
-All autosomes:
-
-```bash
-./nextflow run main.nf -c nextflow.config --chroms 1..22 -resume
-```
-
-Control max parallel chromosome jobs (local VM safety):
-
-```bash
-./nextflow run main.nf -c nextflow.config --max_forks 2 -resume
-```
-
-Enable strand-flip matching (only if needed):
-
-```bash
-./nextflow run main.nf -c nextflow.config --allow_strand_flip true -resume
-```
-
----
-
-# Running safely inside tmux (so it never dies)
-
-If your browser disconnects, VPN drops, or the AoU session times out, `tmux` keeps the run alive.
-
-### 1) Start (or reuse) a tmux session
-
-```bash
-tmux new -A -s prs_nf
-```
-
-### 2) Run the pipeline *inside tmux* and log stdout
-
+Run your pipeline inside it:
 ```bash
 cd /home/jupyter/workspaces/allofusgwasonmetabolictraits/prs_nf/AoU_CERC_prs_nf
-
-./nextflow run main.nf -c nextflow.config --chroms 21..22 -resume \
-  2>&1 | tee run.nextflow.stdout.log
+./nextflow run main.nf -c nextflow.config -resume 2>&1 | tee run.stdout.log
 ```
 
-### 3) Detach and leave it running
+Detach (leave it running):
+- Press `Ctrl+b`, then `d`
 
-Press:
-- `Ctrl + b` then `d`
-
-### 4) Reattach later
-
+Reattach later:
 ```bash
 tmux attach -t prs_nf
 ```
 
-### 5) Check sessions / kill when done
-
-```bash
-tmux ls
-tmux kill-session -t prs_nf
-```
-
-### Live debugging while it runs
-
-The **best live Nextflow log** is always:
-
-```bash
-tail -f .nextflow.log
-```
-
 ---
 
-## Output structure
+## Quick test run (recommended first time)
 
-All pipeline outputs go under `--outdir`.
-
-Typical structure:
-
-- `outdir/per_chr/`
-  - per-chromosome scoring outputs (each trait produces `*.sscore`)
-
-- `outdir/prs_merged/`
-  - per-trait genome-wide PRS files
-  - final matrix across all traits
-
-- `outdir/pipeline_trace.txt`
-- `outdir/pipeline_report.html`
-- `outdir/pipeline_timeline.html`
-- `outdir/pipeline_dag.svg`
-
----
-
-# How to read the HTML report & logs (what to click / what it means)
-
-## Viewing HTML in AoU Workbench
-In the AoU Jupyter file browser:
-1. navigate to your `--outdir`
-2. click `pipeline_report.html` or `pipeline_timeline.html`
-3. open in a new browser tab
-
-If it doesn’t render, download it and open locally in Chrome.
-
----
-
-## 1) `pipeline_report.html` (the “what happened?” report)
-This is your best “one screen summary”.
-
-Look for:
-- **Processes section**: which processes ran (scoring / merge / matrix)
-- **Task table**: runtimes and failures
-- **Failures tab**: which task failed + exit code
-
-Common use:
-- “Which chromosome was slow?”
-- “Which step failed first?”
-
----
-
-## 2) `pipeline_timeline.html` (the “parallelization” report)
-This shows **concurrency over time** (Gantt chart style).
-
-Look for:
-- Are chromosome tasks running in parallel?
-- Is one chromosome a straggler (usually chr1/chr2)?
-- Are you under-utilizing CPU (max_forks too low)?
-
----
-
-## 3) `pipeline_trace.txt` (the “spreadsheet” log)
-A tabular run record per task.
-
-Useful columns:
-- `process`, `tag`, `status`, `exit`
-- `start`, `complete`, `duration`
-- `cpus`, `memory`
-- `hash` (unique task ID)
-
-This is great for quick grep/filters:
-
-```bash
-column -t outdir/pipeline_trace.txt | less -S
-```
-
----
-
-## 4) `.nextflow.log` (the global run log)
-This is the **first file to check if anything crashes**.
-
-```bash
-less .nextflow.log
-```
-
-What it tells you:
-- why Nextflow stopped
-- which process crashed
-- stack traces for session/lock problems
-
----
-
-## 5) Work directory debugging (deep dive)
-Every task runs in a unique directory under `work/`.
-
-Inside a failing task dir you’ll see:
-- `.command.sh`  (exact script that ran)
-- `.command.out` (stdout)
-- `.command.err` (stderr)
-- `.exitcode`
-
-How to inspect:
-```bash
-ls -lh work/
-cat work/<hash>/.command.err
-cat work/<hash>/.command.sh
-```
-
-This is the **most foolproof** way to debug *exactly what ran*.
-
----
-
-# How `-resume` works (and how to not lose progress)
-
-Nextflow **caches each task** based on:
-- the process code
-- the input files
-- the parameters
-
-When you re-run with the **same `--workdir`** and add `-resume`:
-
-✅ tasks that already completed successfully are **skipped**  
-✅ only missing/failed/changed tasks are **recomputed**
-
-### Best practices for resume
-- keep `--workdir` stable for the whole project run
-- always rerun with the same command + `-resume`
+Run only **chr21–22** and only **2 traits** to verify everything works.
 
 Example:
 ```bash
-./nextflow run main.nf -c nextflow.config --chroms 1..22 -resume
+./nextflow run main.nf -c nextflow.config -resume   --chroms 21..22   --traits "VAT_to_Android,Leg_lean"   --weights_glob "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/inputs/00.Adiposity/*.tsv.gz"   --pfile_dir  "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/pgen_dir"   --pfile_pref "snpqc.chr{chrom}"   --outdir  "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/prs_out_test"   --workdir "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/nf_work/prs_out_test"
 ```
 
-### When will it recompute things?
-It’s normal for Nextflow to rerun tasks if you changed:
-- pipeline code (main.nf / modules)
-- parameter values
-- input weights
-- genotype files
-
-Because those changes alter the task hash.
+What success looks like:
+- you see **one job per chromosome**
+- inside each chromosome job, you see **one PLINK2 scoring run** (not one per trait)
 
 ---
 
-# Troubleshooting
+## Full run (chr1–22, all traits)
 
-## “Unable to acquire lock on session …”
-This happens if:
-- you actually have a pipeline still running, OR
-- a prior run was killed abruptly and left a stale lock
-
-First check if another run is active:
 ```bash
-ps aux | grep nextflow
+./nextflow run main.nf -c nextflow.config -resume   --chroms 1..22
 ```
-
-If nothing is running and you’re sure it’s stale, the fix is usually:
-- rerun with a *new* `-name`, OR
-- remove the stale session cache directory mentioned in the error
-
-(Always prefer the least destructive fix: new run name.)
 
 ---
 
-## “plink2 not found”
-Check:
+## Key parameters (simple explanations)
+
+- `--chroms`  
+  Which chromosomes to run. Examples:
+  - `21..22`
+  - `1..22`
+  - `1,2,7`
+
+- `--weights_glob`  
+  A file pattern that matches your weight files.
+  Example: `"/path/to/weights/*.tsv.gz"`
+
+- `--traits` *(optional)*  
+  Comma-separated list of trait names to run (for testing).
+  Example: `"VAT_to_Android,Leg_lean"`  
+  If omitted, pipeline runs **all weights matched by `--weights_glob`**.
+
+- `--pfile_dir`  
+  Folder containing chromosome pfiles.
+
+- `--pfile_pref`  
+  Prefix template for each chromosome. Must include `{chrom}`.
+  Example: `snpqc.chr{chrom}`
+
+- `--outdir`  
+  Where final outputs + reports go.
+
+- `--workdir`  
+  Nextflow cache/work directory. Keep it stable so `-resume` works well.
+
+- `--plink2_bin` *(optional)*  
+  Path to plink2 if not on PATH.
+
+- `--allow_strand_flip` *(optional, default false)*  
+  Only enable if you are sure you need it (can hide mismatches).
+
+---
+
+## Where outputs go
+
+Inside `--outdir` you will typically see:
+
+### A) Per-chromosome outputs (intermediate)
+- `per_chr/TRAIT.chrX.scored.sscore`
+
+These are useful for debugging *which variants scored* and *how many overlapped*.
+
+### B) Genome-wide PRS per trait
+- `prs_merged/TRAIT.genomewide.sscore.tsv`
+
+This is one PRS column per trait per person.
+
+### C) Final PRS matrix (all traits together)
+- `prs_merged/prs_matrix_ALL_TRAITS.tsv`
+
+One row per person, one PRS column per trait.
+
+### D) Nextflow reports (great for first-time users)
+- `pipeline_report.html` (summary of tasks, failures, durations)
+- `pipeline_timeline.html` (timeline view)
+- `pipeline_trace.txt` (tabular trace)
+- `pipeline_dag.svg` (pipeline DAG)
+
+Open the HTML files in the AoU notebook file browser or download them locally.
+
+---
+
+## How to tell the pipeline is doing the optimized “load once per chromosome” scoring
+
+For each chromosome, look at the chromosome scoring log (published under `per_chr/` or process logs):
+
+You want to see:
+- multiple traits being prepared (`make_scorefile` messages)
+- then **a single PLINK2 scoring run** for that chromosome
+
+If you see “Calculating allele frequencies…” repeating 30+ times for the same chromosome, that means PLINK2 is being launched per trait (not optimized). This pipeline is designed to avoid that.
+
+---
+
+## If something fails: how to debug
+
+### 1) Look at `.nextflow.log`
 ```bash
-which plink2
-plink2 --version
+tail -n 200 .nextflow.log
 ```
 
-Or pass a custom binary path:
+### 2) Find the work directory for the failed task
+Nextflow prints something like:
+```
+Work dir: /.../nf_work/.../ab/cdef123...
+```
+Go there and inspect:
+- `.command.sh` (exact command that ran)
+- `.command.err` (errors)
+- `.command.out` (stdout)
+
+### 3) Rerun with `-resume`
+Once fixed:
 ```bash
-./nextflow run main.nf -c nextflow.config --plink2_bin "/path/to/plink2" -resume
+./nextflow run main.nf -c nextflow.config -resume ...
 ```
 
 ---
 
-## “No overlap / empty results”
-Usually:
-- weights are different build than genotypes
-- alleles don’t match and strand-flip is off
-- chrom/pos IDs don’t match
+## Common problems (and fixes)
 
-What to inspect:
-- per-chrom scoring logs under `outdir/per_chr/`
-- `.command.err` for the failing task
-
----
-
-# Presentation / Talk Track (speaker notes)
-
-Use this section as a **script** when presenting the pipeline.
-
-## 30-second overview (what the pipeline is)
-> “This Nextflow DSL2 pipeline computes polygenic risk scores in All of Us using PLINK2 pfiles and per-trait GWAS weight files.  
-> The key optimization is we run **one job per chromosome**, and score **all traits inside that job**, so we don’t repeatedly reload the same large genotype files.  
-> Outputs include per-chromosome `.sscore` files, genome-wide PRS per trait, and a final PRS matrix across all traits.”
-
----
-
-## What problem it solves (why we built it)
-- We want PRS for many traits (dozens to hundreds)
-- Genotypes are huge → I/O dominates runtime if you score `(trait × chr)`
-- AoU Workbench environment can disconnect → need robustness
-- Need reproducible outputs + resumability
-
----
-
-## Key design decisions (what makes it efficient)
-1. **One chromosome task scores all traits**
-   - minimizes genotype file staging / repeated reads
-2. **Local-only config by default**
-   - avoids shared `gs://` overwrite risk in organization buckets
-3. **Symlink staging for pfiles**
-   - avoids copying massive `.pgen` into every task directory
-4. **Nextflow caching (`-resume`)**
-   - restartable after disconnects or failures
-
----
-
-## Walkthrough: what each step does (pipeline flow)
-1. **Discover weights**
-   - glob all weights files from `--weights_glob`
-   - derive trait names from filenames
-2. **Build chromosome job inputs**
-   - for each chromosome → load matching `.pgen/.pvar/.psam`
-3. **Scoring**
-   - for each chromosome job → run PLINK2 scoring for all traits
-   - produces `trait.chrN.scored.sscore`
-4. **Merge per trait**
-   - group `*.sscore` across chromosomes for a trait
-   - sum to genome-wide PRS per individual
-5. **Build matrix**
-   - combine all trait genome-wide scores into one matrix
-
----
-
-## How to “prove it ran correctly” (demo checklist)
-- Check `pipeline_report.html` → all tasks succeeded
-- Check `pipeline_trace.txt` → no failed tasks (`exit != 0`)
-- Confirm outputs exist:
-  - `outdir/per_chr/*.sscore`
-  - `outdir/prs_merged/` final trait PRS
-  - final PRS matrix across traits
-
----
-
-## How to read the HTML outputs (what to say while showing them)
-### `pipeline_report.html`
-- “This is the best summary page: processes + runtimes + failures.”
-- “If something fails, I immediately use this to identify the exact task.”
-
-### `pipeline_timeline.html`
-- “This shows parallelization — I expect multiple chromosomes running at once.”
-- “Long bars highlight bottlenecks like chr1/chr2.”
-
-### `pipeline_trace.txt`
-- “This is the machine-readable task table — great for quick performance debugging.”
-
----
-
-## Debugging story (what you check first when it fails)
-1. `.nextflow.log` for the overall crash reason
-2. failing task work directory:
-   - `.command.err` for the real error message
-   - `.command.sh` to rerun manually if needed
-
----
-
-## Resume story (why -resume matters)
-> “If my VM disconnects, I rerun the same command with `-resume`.  
-> Nextflow skips anything that already finished successfully and only recomputes missing pieces.  
-> As long as `--workdir` is unchanged, we don’t lose progress.”
-
----
-
-## Closing (what this enables downstream)
-- PRS matrix can feed:
-  - association models
-  - clustering/phenotyping
-  - correlation with IDPs / metabolic traits
-  - stratified PRS analyses by ancestry/sex
-
----
-
-## Recommended “demo run” commands for a live presentation
-
-Small test run:
+### “plink2: command not found”
+Either add plink2 to PATH or pass:
 ```bash
-./nextflow run main.nf -c nextflow.config --chroms 21..22 --traits "VATadj,BMIadj" -resume
+--plink2_bin /path/to/plink2
 ```
 
-Full autosomes:
-```bash
-./nextflow run main.nf -c nextflow.config --chroms 1..22 -resume
-```
+### “Empty score file / no overlaps”
+That trait had no variants overlapping that chromosome (or alleles didn’t match).
+This is not always an error—some traits have very few lead SNPs on some chromosomes.
 
-Inside tmux:
-```bash
-tmux new -A -s prs_nf
-./nextflow run main.nf -c nextflow.config --chroms 1..22 -resume 2>&1 | tee run.stdout.log
-```
+### “unrecognized arguments: --score_name”
+Your `bin/make_scorefile.py` must support the `--score_name` argument.  
+Update `make_scorefile.py` to include it (this pipeline relies on it to name score columns correctly).
+
+---
+
+## Notes for collaborators (what you should *not* do)
+
+- Do **not** run `score_trait_chr.nf` unless you are explicitly asked to.
+- Do **not** run “one trait at a time” scoring loops — it is slower and more expensive.
+- Do **not** override configs to use shared org-wide GCS paths unless you know what you're doing.
+  This repo is intended to be run **locally in your workspace** to avoid accidental overwrites.
+
+---
+
+## Contact / questions
+
+If you are running this for the first time and something is confusing, the fastest way to debug is to share:
+- the command you ran,
+- the last ~50 lines of `.nextflow.log`, and
+- the failed task’s `.command.err`.
 
