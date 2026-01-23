@@ -1,21 +1,17 @@
-# AoU_CERC_prs_nf (Nextflow) — PRS scoring in **22 chromosome jobs** (recommended)
+ PRS using Nextflow on the AllofUs Researcher Workbench
 
 This repository computes **polygenic risk scores (PRS)** in the **All of Us (AoU) Researcher Workbench** using:
 - AoU genotype files in **PLINK2 pfile** format (`.pgen/.pvar/.psam`), one set per chromosome, and
 - GWAS **weight files** (usually LD-clumped), one file per trait.
 
-✅ **This README explains only the recommended way to run the pipeline:**  
-**the “22-job structure” = 1 job per chromosome (chr1…chr22)**.
-
 ---
 
-## The one idea you need to understand: “22-job structure”
+## Intro
+Note: the slow part in a PRS pipeline is often not the scoring itself—it's repeatedly opening huge genotype files and doing setup work (like allele frequency calculations).
 
-If you are new to PRS scoring, the slow part is often not the scoring itself—it's repeatedly opening huge genotype files and doing setup work (like allele frequency calculations).
+### The problem
 
-### What “22-job structure” means (plain English)
-
-- Human autosomal DNA is split into **22 chromosomes** (chr1–chr22).
+- Data is split into **22 chromosomes** (chr1–chr22).
 - AoU genotype data is stored as **one big file-set per chromosome**:
   - `chr7.pgen`, `chr7.pvar`, `chr7.psam`  (and similarly for each chromosome)
 - If you score **one trait at a time**, you end up doing this many times:
@@ -24,7 +20,7 @@ If you are new to PRS scoring, the slow part is often not the scoring itself—i
   - “Open chr7 files → do setup → score trait C”  
   …which is slow and costs more compute.
 
-### What this pipeline does instead
+### How we attempt to solve it
 
 For each chromosome **once**:
 
@@ -35,6 +31,7 @@ For each chromosome **once**:
 
 So the pipeline runs **22 chromosome jobs** (chr1…chr22).  
 Each chromosome job runs **one PLINK2 scoring pass** for all traits.
+So if you are running across all chromsomes, you will always have 22 jobs **regardless of the number of traits**.
 
 That’s the core optimization.
 
@@ -73,14 +70,14 @@ AoU_CERC_prs_nf/
     └── Dockerfile
 ```
 
-**Important:** `modules/score_trait_chr.nf` exists in the repo but **is not recommended** and **is not explained here**.
+**Important:** `modules/score_trait_chr.nf` exists in the repo but **is not recommended** and **is not explained here**. It is a stale file that wil be deprecated soon.
 
 ---
 
 ## Before you run: what you need
 
 ### 1) Nextflow
-AoU often has a preinstalled Nextflow, but we recommend using a **local pinned version** (same as AoU training).
+AoU often has a preinstalled Nextflow, but we recommend using a **local pinned version** (same as AoU training). This is because the preinstalled version is much older and you will run into issues with some flags and commands.
 
 Check version:
 ```bash
@@ -128,7 +125,7 @@ These are your clumped GWAS files. Example filenames:
 
 You will tell the pipeline which files to use with:
 - `--weights_glob "/path/to/weights/*.tsv.gz"`
-- optionally `--traits "Trait1,Trait2"` to run a subset
+- optionally `--traits "Trait1,Trait2"` to run a subset (warning: i have not yet tested this feature so use at your own risk for now <3 )
 
 Your weights must contain columns like:
 - `chromosome`
@@ -139,7 +136,7 @@ Your weights must contain columns like:
 
 ---
 
-## Recommended way to run (always): use tmux
+## Recommended way to run: use tmux
 
 AoU notebooks/SSH sessions can disconnect. `tmux` keeps your run alive.
 
@@ -166,11 +163,11 @@ tmux attach -t prs_nf
 
 ## Quick test run (recommended first time)
 
-Run only **chr21–22** and only **2 traits** to verify everything works.
+Run only **chr21–22** and only **few traits** to verify everything works. In the exampe below, the inputs/test folder has only 3 traits.
 
 Example:
 ```bash
-./nextflow run main.nf -c nextflow.config -resume   --chroms 21..22   --traits "VAT_to_Android,Leg_lean"   --weights_glob "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/inputs/00.Adiposity/*.tsv.gz"   --pfile_dir  "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/pgen_dir"   --pfile_pref "snpqc.chr{chrom}"   --outdir  "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/prs_out_test"   --workdir "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/nf_work/prs_out_test"
+./nextflow run main.nf -c nextflow.config -resume   --chroms 21..22   --weights_glob "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/inputs/test/*.tsv.gz"   --pfile_dir  "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/pgen_dir"   --pfile_pref "snpqc.chr{chrom}"   --outdir  "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/prs_out_test"   --workdir "/home/jupyter/workspaces/allofusgwasonmetabolictraits/urvashi_analysis/nf_work/prs_out_test"
 ```
 
 What success looks like:
@@ -199,7 +196,7 @@ What success looks like:
   A file pattern that matches your weight files.
   Example: `"/path/to/weights/*.tsv.gz"`
 
-- `--traits` *(optional)*  
+- `--traits` *(optional) -- remains untested*  
   Comma-separated list of trait names to run (for testing).
   Example: `"VAT_to_Android,Leg_lean"`  
   If omitted, pipeline runs **all weights matched by `--weights_glob`**.
@@ -310,10 +307,10 @@ Update `make_scorefile.py` to include it (this pipeline relies on it to name sco
 ---
 
 ## Notes for collaborators (what you should *not* do)
-
-- Do **not** run `score_trait_chr.nf` unless you are explicitly asked to.
+Please -- 
+- Do **not** run `score_trait_chr.nf` - the pipeline is not optimized for this script and this script will be deprecated soon.
 - Do **not** run “one trait at a time” scoring loops — it is slower and more expensive.
-- Do **not** override configs to use shared org-wide GCS paths unless you know what you're doing.
+- Do **not** override configs to use shared org-wide GCS paths - this is very risky!
   This repo is intended to be run **locally in your workspace** to avoid accidental overwrites.
 
 ---
