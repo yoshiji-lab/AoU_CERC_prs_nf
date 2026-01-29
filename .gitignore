@@ -1,0 +1,13 @@
+# Nextflow runtime
+.nextflow/
+.nextflow.log*
+*.log
+
+# Optional: Nextflow work dirs (if you use default)
+work/
+
+# Optional: reports (if they appear in repo root)
+pipeline_*.html
+pipeline_*.txt
+pipeline_*.svg
+
